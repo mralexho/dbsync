@@ -281,9 +281,16 @@ class DbList extends Command
   private function importSqlFile(SymfonyStyle $io, string $filePath): void
   {
     $io->text('Processing SQL file...');
-    $io->note('This is a placeholder. Implement actual SQL import logic here.');
-    // TODO: Implement actual SQL import logic
-    $io->success('SQL file processed successfully.');
+
+    // Build the SQL command to import the file
+    $command = sprintf('ddev import-db < %s', escapeshellarg($filePath));
+
+    // Execute the SQL command
+    if ($this->executeCommand($io, $command)) {
+      $io->success('SQL file processed successfully.');
+    } else {
+      $io->error('Error processing SQL file.');
+    }
   }
   
   /**
