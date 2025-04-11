@@ -42,6 +42,9 @@
             "App\\Tests\\": "tests/"
         }
     },
+    "bin": [
+        "bin/dbsync"
+    ],
     "replace": {
         "symfony/polyfill-ctype": "*",
         "symfony/polyfill-iconv": "*",

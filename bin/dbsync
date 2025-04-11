@@ -1,0 +1,33 @@
+#!/usr/bin/env php
+<?php
+
+// Find and load the autoloader
+$possibleFiles = [
+    __DIR__ . '/../vendor/autoload.php',           // standalone package
+    __DIR__ . '/../../../autoload.php',            // package installed as a dependency
+    __DIR__ . '/../../../vendor/autoload.php',     // package installed as a dependency (alternative location)
+];
+
+$autoloaderFound = false;
+foreach ($possibleFiles as $file) {
+    if (file_exists($file)) {
+        require $file;
+        $autoloaderFound = true;
+        break;
+    }
+}
+
+if (!$autoloaderFound) {
+    die(
+        'You need to set up the project dependencies using Composer:' . PHP_EOL .
+        '    composer install' . PHP_EOL .
+        'You can learn all about Composer on https://getcomposer.org/.' . PHP_EOL
+    );
+}
+
+use App\Command\DbList;
+use Symfony\Component\Console\Application;
+
+$application = new Application('DbSync', '1.0.0');
+$application->add(new DbList());
+$application->run();
