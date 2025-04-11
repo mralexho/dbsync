@@ -18,6 +18,9 @@ use DateTime;
 )]
 class DbList extends Command
 {
+  // Database path prefix to filter objects
+  private const DB_PATH_PREFIX = 'db/';
+
   protected function configure(): void
   {
     $this
@@ -27,7 +30,8 @@ class DbList extends Command
       ->addOption('max-keys', 'm', InputOption::VALUE_OPTIONAL, 'Maximum number of objects to list', 25)
       ->addOption('prefix', null, InputOption::VALUE_OPTIONAL, 'Filter objects by prefix/path')
       ->addOption('date', 'd', InputOption::VALUE_OPTIONAL, 'Filter objects by date (YYYY-MM-DD), defaults to today')
-      ->addOption('no-date', null, InputOption::VALUE_NONE, 'Disable automatic date filtering');
+      ->addOption('no-date', null, InputOption::VALUE_NONE, 'Disable automatic date filtering')
+      ->addOption('all', 'a', InputOption::VALUE_NONE, 'Show all objects, not just database files');
   }
 
   protected function execute(InputInterface $input, OutputInterface $output): int
@@ -40,6 +44,7 @@ class DbList extends Command
     $prefix = $input->getOption('prefix');
     $date = $input->getOption('date');
     $noDate = $input->getOption('no-date');
+    $showAll = $input->getOption('all');
 
     // Handle date prefix logic
     if ($bucketName && !$noDate) {
@@ -62,6 +67,15 @@ class DbList extends Command
       }
     }
 
+    // Add db/ prefix if not showing all files and no specific prefix is set
+    if ($bucketName && !$showAll && !$prefix) {
+      $prefix = self::DB_PATH_PREFIX;
+    } else if ($bucketName && !$showAll && $prefix) {
+      // If we have a prefix but still want to filter for db files, 
+      // we need to check this later when processing results
+      $filterForDbFiles = true;
+    }
+
     $io->title('Connecting to AWS S3');
     $io->text(sprintf('Using region: %s and profile: %s', $region, $profile));
 
@@ -75,7 +89,7 @@ class DbList extends Command
 
       // If bucket name is provided, list objects in that bucket
       if ($bucketName) {
-        $this->listBucketObjects($s3Client, $io, $bucketName, $maxKeys, $prefix);
+        $this->listBucketObjects($s3Client, $io, $bucketName, $maxKeys, $prefix, $showAll);
       } else {
         // List all buckets
         $this->listAllBuckets($s3Client, $io);
@@ -114,10 +128,13 @@ class DbList extends Command
     }
   }
 
-  private function listBucketObjects(S3Client $s3Client, SymfonyStyle $io, string $bucketName, int $maxKeys, ?string $prefix = null): void
+  private function listBucketObjects(S3Client $s3Client, SymfonyStyle $io, string $bucketName, int $maxKeys, ?string $prefix = null, bool $showAll = false): void
   {
     $prefixInfo = $prefix ? sprintf(' with prefix "%s"', $prefix) : '';
-    $io->section(sprintf('Listing objects in bucket: %s%s (max: %d objects)', $bucketName, $prefixInfo, $maxKeys));
+    $dbFilterInfo = !$showAll ? ' (database files only)' : '';
+    
+    $io->section(sprintf('Listing objects in bucket: %s%s%s (max: %d objects)', 
+      $bucketName, $prefixInfo, $dbFilterInfo, $maxKeys));
 
     // Check if bucket exists
     if (!$s3Client->doesBucketExist($bucketName)) {
@@ -143,7 +160,17 @@ class DbList extends Command
 
     if (count($objects) > 0) {
       $tableRows = [];
+      $filteredCount = 0;
+      
       foreach ($objects as $object) {
+        // Skip non-database files if we're not showing all files
+        // and we haven't already filtered with the prefix
+        if (!$showAll && !$this->isDbFile($object['Key']) && 
+            (!$prefix || strpos($prefix, self::DB_PATH_PREFIX) !== 0)) {
+          $filteredCount++;
+          continue;
+        }
+        
         $size = $this->formatSize($object['Size']);
         $tableRows[] = [
           $object['Key'],
@@ -152,14 +179,28 @@ class DbList extends Command
         ];
       }
 
-      $io->table(['Key', 'Size', 'Last Modified'], $tableRows);
-
-      if (isset($result['IsTruncated']) && $result['IsTruncated']) {
-        $io->note(sprintf('Showing only %d objects. Use --max-keys option to show more.', $maxKeys));
+      if (count($tableRows) > 0) {
+        $io->table(['Key', 'Size', 'Last Modified'], $tableRows);
+        
+        if ($filteredCount > 0) {
+          $io->note(sprintf('Filtered out %d non-database files. Use --all to show all files.', $filteredCount));
+        }
+        
+        if (isset($result['IsTruncated']) && $result['IsTruncated']) {
+          $io->note(sprintf('Showing only %d objects. Use --max-keys option to show more.', $maxKeys));
+        }
+      } else {
+        $io->warning(sprintf('No database files found in bucket "%s"%s.', $bucketName, $prefixInfo));
       }
     } else {
       $io->warning(sprintf('No objects found in bucket "%s"%s.', $bucketName, $prefixInfo));
     }
+  }
+
+  private function isDbFile(string $key): bool
+  {
+    // Check if the key contains the database path prefix
+    return strpos($key, self::DB_PATH_PREFIX) !== false;
   }
 
   private function formatSize(int $sizeInBytes): string
