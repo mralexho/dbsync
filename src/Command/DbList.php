@@ -393,4 +393,56 @@ class DbList extends Command
       rmdir($dir);
     }
   }
+
+  /**
+   * Execute a shell command and return the output
+   */
+  private function executeCommand(SymfonyStyle $io, string $command): bool
+  {
+    $io->text(sprintf('Executing: %s', $command));
+    
+    $process = proc_open(
+      $command,
+      [
+        0 => ['pipe', 'r'],  // stdin
+        1 => ['pipe', 'w'],  // stdout
+        2 => ['pipe', 'w'],  // stderr
+      ],
+      $pipes
+    );
+    
+    if (is_resource($process)) {
+      // Close stdin
+      fclose($pipes[0]);
+      
+      // Read stdout
+      $output = stream_get_contents($pipes[1]);
+      fclose($pipes[1]);
+      
+      // Read stderr
+      $error = stream_get_contents($pipes[2]);
+      fclose($pipes[2]);
+      
+      // Close process
+      $exitCode = proc_close($process);
+      
+      if ($exitCode === 0) {
+        if (!empty($output)) {
+          $io->text('Command output:');
+          $io->writeln($output);
+        }
+        return true;
+      } else {
+        $io->error(sprintf('Command failed with exit code %d', $exitCode));
+        if (!empty($error)) {
+          $io->text('Error output:');
+          $io->writeln($error);
+        }
+        return false;
+      }
+    }
+    
+    $io->error('Failed to execute command');
+    return false;
+  }
 }
