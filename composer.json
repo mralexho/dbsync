@@ -1,6 +1,14 @@
 {
-    "type": "project",
-    "license": "proprietary",
+    "name": "mralexho/dbsync",
+    "description": "Database sync utility for S3 backups",
+    "type": "library",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Alex Ho",
+            "email": "mralexho@users.noreply.github.com"
+        }
+    ],
     "minimum-stability": "stable",
     "prefer-stable": true,
     "require": {
