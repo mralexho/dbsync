@@ -96,17 +96,62 @@ class DbList extends Command
       return;
     }
 
-    // List objects in the bucket
-    $result = $s3Client->listObjects([
+    // Get a list of all date-based folders first
+    $result = $s3Client->listObjectsV2([
       'Bucket' => $bucketName,
-      'MaxKeys' => $maxKeys
+      'Delimiter' => '/',
+      'MaxKeys' => 1000 // Get a reasonable number of prefixes
     ]);
 
-    $objects = $result['Contents'] ?? [];
-
-    if (count($objects) > 0) {
+    $prefixes = $result['CommonPrefixes'] ?? [];
+    $dateFolders = [];
+    
+    // Extract date folders that match YYYY-MM-DD/ pattern
+    foreach ($prefixes as $prefix) {
+      $prefixName = $prefix['Prefix'];
+      if (preg_match('/^\d{4}-\d{2}-\d{2}\//', $prefixName)) {
+        $dateFolders[] = $prefixName;
+      }
+    }
+    
+    if (empty($dateFolders)) {
+      $io->warning(sprintf('No date-based folders (YYYY-MM-DD/) found in bucket "%s".', $bucketName));
+      return;
+    }
+    
+    // Sort date folders in descending order (newest first)
+    rsort($dateFolders);
+    
+    $allDbObjects = [];
+    $totalFound = 0;
+    
+    // For each date folder, check if it has a db/ subfolder and list its contents
+    foreach ($dateFolders as $dateFolder) {
+      $dbPrefix = $dateFolder . 'db/';
+      
+      $dbResult = $s3Client->listObjectsV2([
+        'Bucket' => $bucketName,
+        'Prefix' => $dbPrefix,
+        'MaxKeys' => $maxKeys
+      ]);
+      
+      $dbObjects = $dbResult['Contents'] ?? [];
+      
+      if (!empty($dbObjects)) {
+        $totalFound += count($dbObjects);
+        $allDbObjects = array_merge($allDbObjects, $dbObjects);
+        
+        // If we've collected enough objects, stop searching more folders
+        if (count($allDbObjects) >= $maxKeys) {
+          $allDbObjects = array_slice($allDbObjects, 0, $maxKeys);
+          break;
+        }
+      }
+    }
+    
+    if (count($allDbObjects) > 0) {
       $tableRows = [];
-      foreach ($objects as $object) {
+      foreach ($allDbObjects as $object) {
         $size = $this->formatSize($object['Size']);
         $tableRows[] = [
           $object['Key'],
@@ -116,12 +161,15 @@ class DbList extends Command
       }
 
       $io->table(['Key', 'Size', 'Last Modified'], $tableRows);
-
-      if (isset($result['IsTruncated']) && $result['IsTruncated']) {
+      
+      $io->info(sprintf('Found %d objects in YYYY-MM-DD/db/ folders (showing %d).', 
+        $totalFound, count($allDbObjects)));
+        
+      if ($totalFound > $maxKeys) {
         $io->note(sprintf('Showing only %d objects. Use --max-keys option to show more.', $maxKeys));
       }
     } else {
-      $io->warning(sprintf('No objects found in bucket "%s".', $bucketName));
+      $io->warning(sprintf('No objects found in YYYY-MM-DD/db/ folders in bucket "%s".', $bucketName));
     }
   }
 
