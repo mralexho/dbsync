@@ -195,14 +195,7 @@ class DbList extends Command
       if ($selectedIndex !== null) {
         $selectedFile = $fileChoices[$selectedIndex];
         $io->success(sprintf('Selected file: %s', $selectedFile));
-        
-        // Ask for confirmation before proceeding
-        if ($io->confirm(sprintf('Are you sure you want to sync %s?', $selectedFile), false)) {
-          $io->text('Starting sync process...');
-          $this->syncFile($s3Client, $io, $bucketName, $selectedFile);
-        } else {
-          $io->text('Sync cancelled.');
-        }
+        $this->syncFile($s3Client, $io, $bucketName, $selectedFile);
       }
     } else {
       $io->warning(sprintf('No objects found in YYYY-MM-DD/db/ folders in bucket "%s".', $bucketName));
