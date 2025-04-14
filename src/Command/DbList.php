@@ -23,7 +23,8 @@ class DbList extends Command
       ->addOption('region', 'r', InputOption::VALUE_OPTIONAL, 'AWS region', 'us-east-1')
       ->addOption('s3profile', 'p', InputOption::VALUE_OPTIONAL, 'AWS profile', 'default')
       ->addOption('bucket', 'b', InputOption::VALUE_OPTIONAL, 'List objects in specific bucket')
-      ->addOption('max-keys', 'm', InputOption::VALUE_OPTIONAL, 'Maximum number of objects to list', 25);
+      ->addOption('max-keys', 'm', InputOption::VALUE_OPTIONAL, 'Maximum number of objects to list', 25)
+      ->addOption('download-dir', 'd', InputOption::VALUE_OPTIONAL, 'Directory to save downloaded files', getcwd());
   }
 
   protected function execute(InputInterface $input, OutputInterface $output): int
@@ -33,6 +34,7 @@ class DbList extends Command
     $profile = $input->getOption('s3profile');
     $bucketName = $input->getOption('bucket');
     $maxKeys = (int)$input->getOption('max-keys');
+    $downloadDir = $input->getOption('download-dir');
 
     $io->title('Connecting to AWS S3');
     $io->text(sprintf('Using region: %s and profile: %s', $region, $profile));
@@ -47,7 +49,7 @@ class DbList extends Command
 
       // If bucket name is provided, list objects in that bucket
       if ($bucketName) {
-        $this->listBucketObjects($s3Client, $io, $bucketName, $maxKeys);
+        $this->listBucketObjects($s3Client, $io, $bucketName, $maxKeys, $downloadDir);
       } else {
         // List all buckets
         $this->listAllBuckets($s3Client, $io);
@@ -86,7 +88,7 @@ class DbList extends Command
     }
   }
 
-  private function listBucketObjects(S3Client $s3Client, SymfonyStyle $io, string $bucketName, int $maxKeys): void
+  private function listBucketObjects(S3Client $s3Client, SymfonyStyle $io, string $bucketName, int $maxKeys, string $downloadDir): void
   {
     $io->section(sprintf('Listing objects in bucket: %s (max: %d objects)', $bucketName, $maxKeys));
 
@@ -176,9 +178,9 @@ class DbList extends Command
         $io->note(sprintf('Showing only %d objects. Use --max-keys option to show more.', $maxKeys));
       }
       
-      // Ask user to select a file to sync directly
+      // Ask user to select a file to download directly
       $selectedIndex = $io->ask(
-        'Enter the number (#) of the file you want to sync (or press Enter to skip)',
+        'Enter the number (#) of the file you want to download (or press Enter to skip)',
         null,
         function ($answer) use ($fileChoices) {
           if ($answer === null || $answer === '') {
@@ -195,14 +197,7 @@ class DbList extends Command
       if ($selectedIndex !== null) {
         $selectedFile = $fileChoices[$selectedIndex];
         $io->success(sprintf('Selected file: %s', $selectedFile));
-        
-        // Ask for confirmation before proceeding
-        if ($io->confirm(sprintf('Are you sure you want to sync %s?', $selectedFile), false)) {
-          $io->text('Starting sync process...');
-          $this->syncFile($s3Client, $io, $bucketName, $selectedFile);
-        } else {
-          $io->text('Sync cancelled.');
-        }
+        $this->downloadFile($s3Client, $io, $bucketName, $selectedFile, $downloadDir);
       }
     } else {
       $io->warning(sprintf('No objects found in YYYY-MM-DD/db/ folders in bucket "%s".', $bucketName));
@@ -226,181 +221,38 @@ class DbList extends Command
   /**
    * Sync a specific file from S3
    */
-  private function syncFile(S3Client $s3Client, SymfonyStyle $io, string $bucketName, string $objectKey): void
+  private function downloadFile(S3Client $s3Client, SymfonyStyle $io, string $bucketName, string $objectKey, string $downloadDir): void
   {
-    $io->section('File Sync');
+    $io->section('File Download');
     
     try {
-      // Get the file extension to determine file type
-      $extension = pathinfo($objectKey, PATHINFO_EXTENSION);
+      // Ensure the download directory exists
+      if (!is_dir($downloadDir)) {
+        if (!mkdir($downloadDir, 0755, true)) {
+          throw new \RuntimeException(sprintf('Could not create download directory: %s', $downloadDir));
+        }
+      }
       
-      // Create a temporary file to download to
-      $tempFile = tempnam(sys_get_temp_dir(), 'db_sync_');
+      // Create a filename for the downloaded file
+      $filename = basename($objectKey);
+      $filePath = $downloadDir . '/' . $filename;
       
-      $io->text(sprintf('Downloading %s to temporary file...', $objectKey));
+      $io->text(sprintf('Downloading %s to %s...', $objectKey, $filePath));
       
       // Download the file from S3
       $s3Client->getObject([
         'Bucket' => $bucketName,
         'Key' => $objectKey,
-        'SaveAs' => $tempFile
+        'SaveAs' => $filePath
       ]);
       
-      $io->text('Download complete. Processing file...');
-      
-      // Handle different file types
-      switch (strtolower($extension)) {
-        case 'sql':
-          $this->importSqlFile($io, $tempFile);
-          break;
-        case 'gz':
-        case 'gzip':
-          $this->importGzipFile($io, $tempFile);
-          break;
-        case 'zip':
-          $this->importZipFile($io, $tempFile);
-          break;
-        default:
-          $io->error(sprintf('Unsupported file type: %s', $extension));
-      }
-      
-      // Clean up the temporary file
-      if (file_exists($tempFile)) {
-        unlink($tempFile);
-        $io->text('Temporary file removed.');
-      }
+      $io->success(sprintf('File successfully downloaded to: %s', $filePath));
       
     } catch (\Exception $e) {
-      $io->error('Error during sync: ' . $e->getMessage());
+      $io->error('Error during download: ' . $e->getMessage());
     }
   }
   
-  /**
-   * Import a SQL file
-   */
-  private function importSqlFile(SymfonyStyle $io, string $filePath): void
-  {
-    $io->text('Processing SQL file...');
-
-    // Build the SQL command to import the file
-    $command = sprintf('ddev import-db < %s', escapeshellarg($filePath));
-
-    // Execute the SQL command
-    if ($this->executeCommand($io, $command)) {
-      $io->success('SQL file processed successfully.');
-    } else {
-      $io->error('Error processing SQL file.');
-    }
-  }
-  
-  /**
-   * Import a gzipped file
-   */
-  private function importGzipFile(SymfonyStyle $io, string $filePath): void
-  {
-    $io->text('Processing gzipped file...');
-    
-    // Create a temporary file for the uncompressed content
-    $tempSqlFile = tempnam(sys_get_temp_dir(), 'db_sync_sql_');
-    
-    try {
-      // Uncompress the gzip file
-      $gzipHandle = gzopen($filePath, 'rb');
-      $sqlHandle = fopen($tempSqlFile, 'wb');
-      
-      while (!gzeof($gzipHandle)) {
-        fwrite($sqlHandle, gzread($gzipHandle, 4096));
-      }
-      
-      gzclose($gzipHandle);
-      fclose($sqlHandle);
-      
-      // Process the uncompressed SQL file
-      $this->importSqlFile($io, $tempSqlFile);
-      
-      // Clean up
-      if (file_exists($tempSqlFile)) {
-        unlink($tempSqlFile);
-      }
-      
-    } catch (\Exception $e) {
-      $io->error('Error processing gzipped file: ' . $e->getMessage());
-      
-      // Clean up on error
-      if (file_exists($tempSqlFile)) {
-        unlink($tempSqlFile);
-      }
-    }
-  }
-  
-  /**
-   * Import a ZIP file
-   */
-  private function importZipFile(SymfonyStyle $io, string $filePath): void
-  {
-    $io->text('Processing ZIP file...');
-    
-    try {
-      $zip = new \ZipArchive();
-      if ($zip->open($filePath) === true) {
-        // Create a temporary directory for extraction
-        $tempDir = sys_get_temp_dir() . '/db_sync_zip_' . uniqid();
-        mkdir($tempDir);
-        
-        // Extract the ZIP file
-        $zip->extractTo($tempDir);
-        $zip->close();
-        
-        $io->text('ZIP file extracted. Looking for SQL files...');
-        
-        // Find SQL files in the extracted directory
-        $sqlFiles = glob($tempDir . '/*.sql');
-        
-        if (count($sqlFiles) > 0) {
-          foreach ($sqlFiles as $sqlFile) {
-            $io->text(sprintf('Found SQL file: %s', basename($sqlFile)));
-            $this->importSqlFile($io, $sqlFile);
-          }
-        } else {
-          $io->warning('No SQL files found in the ZIP archive.');
-        }
-        
-        // Clean up the temporary directory
-        $this->removeDirectory($tempDir);
-        
-      } else {
-        $io->error('Failed to open ZIP file.');
-      }
-    } catch (\Exception $e) {
-      $io->error('Error processing ZIP file: ' . $e->getMessage());
-      
-      // Clean up on error
-      if (isset($tempDir) && is_dir($tempDir)) {
-        $this->removeDirectory($tempDir);
-      }
-    }
-  }
-  
-  /**
-   * Recursively remove a directory and its contents
-   */
-  private function removeDirectory(string $dir): void
-  {
-    if (is_dir($dir)) {
-      $objects = scandir($dir);
-      foreach ($objects as $object) {
-        if ($object != "." && $object != "..") {
-          if (is_dir($dir . "/" . $object)) {
-            $this->removeDirectory($dir . "/" . $object);
-          } else {
-            unlink($dir . "/" . $object);
-          }
-        }
-      }
-      rmdir($dir);
-    }
-  }
-
   /**
    * Execute a shell command and return the output
    */
