@@ -23,7 +23,8 @@ class DbList extends Command
       ->addOption('region', 'r', InputOption::VALUE_OPTIONAL, 'AWS region', 'us-east-1')
       ->addOption('s3profile', 'p', InputOption::VALUE_OPTIONAL, 'AWS profile', 'default')
       ->addOption('bucket', 'b', InputOption::VALUE_OPTIONAL, 'List objects in specific bucket')
-      ->addOption('max-keys', 'm', InputOption::VALUE_OPTIONAL, 'Maximum number of objects to list', 25);
+      ->addOption('max-keys', 'm', InputOption::VALUE_OPTIONAL, 'Maximum number of objects to list', 25)
+      ->addOption('download-dir', 'd', InputOption::VALUE_OPTIONAL, 'Directory to save downloaded files', getcwd());
   }
 
   protected function execute(InputInterface $input, OutputInterface $output): int
@@ -33,6 +34,7 @@ class DbList extends Command
     $profile = $input->getOption('s3profile');
     $bucketName = $input->getOption('bucket');
     $maxKeys = (int)$input->getOption('max-keys');
+    $downloadDir = $input->getOption('download-dir');
 
     $io->title('Connecting to AWS S3');
     $io->text(sprintf('Using region: %s and profile: %s', $region, $profile));
@@ -47,7 +49,7 @@ class DbList extends Command
 
       // If bucket name is provided, list objects in that bucket
       if ($bucketName) {
-        $this->listBucketObjects($s3Client, $io, $bucketName, $maxKeys);
+        $this->listBucketObjects($s3Client, $io, $bucketName, $maxKeys, $downloadDir);
       } else {
         // List all buckets
         $this->listAllBuckets($s3Client, $io);
@@ -86,7 +88,7 @@ class DbList extends Command
     }
   }
 
-  private function listBucketObjects(S3Client $s3Client, SymfonyStyle $io, string $bucketName, int $maxKeys): void
+  private function listBucketObjects(S3Client $s3Client, SymfonyStyle $io, string $bucketName, int $maxKeys, string $downloadDir): void
   {
     $io->section(sprintf('Listing objects in bucket: %s (max: %d objects)', $bucketName, $maxKeys));
 
@@ -176,9 +178,9 @@ class DbList extends Command
         $io->note(sprintf('Showing only %d objects. Use --max-keys option to show more.', $maxKeys));
       }
       
-      // Ask user to select a file to sync directly
+      // Ask user to select a file to download directly
       $selectedIndex = $io->ask(
-        'Enter the number (#) of the file you want to sync (or press Enter to skip)',
+        'Enter the number (#) of the file you want to download (or press Enter to skip)',
         null,
         function ($answer) use ($fileChoices) {
           if ($answer === null || $answer === '') {
@@ -195,7 +197,7 @@ class DbList extends Command
       if ($selectedIndex !== null) {
         $selectedFile = $fileChoices[$selectedIndex];
         $io->success(sprintf('Selected file: %s', $selectedFile));
-        $this->syncFile($s3Client, $io, $bucketName, $selectedFile);
+        $this->downloadFile($s3Client, $io, $bucketName, $selectedFile, $downloadDir);
       }
     } else {
       $io->warning(sprintf('No objects found in YYYY-MM-DD/db/ folders in bucket "%s".', $bucketName));
@@ -219,24 +221,32 @@ class DbList extends Command
   /**
    * Sync a specific file from S3
    */
-  private function syncFile(S3Client $s3Client, SymfonyStyle $io, string $bucketName, string $objectKey): void
+  private function downloadFile(S3Client $s3Client, SymfonyStyle $io, string $bucketName, string $objectKey, string $downloadDir): void
   {
-    $io->section('File Sync');
+    $io->section('File Download');
     
     try {
       // Get the file extension to determine file type
       $extension = pathinfo($objectKey, PATHINFO_EXTENSION);
       
-      // Create a temporary file to download to
-      $tempFile = tempnam(sys_get_temp_dir(), 'db_sync_');
+      // Ensure the download directory exists
+      if (!is_dir($downloadDir)) {
+        if (!mkdir($downloadDir, 0755, true)) {
+          throw new \RuntimeException(sprintf('Could not create download directory: %s', $downloadDir));
+        }
+      }
       
-      $io->text(sprintf('Downloading %s to temporary file...', $objectKey));
+      // Create a filename for the downloaded file
+      $filename = basename($objectKey);
+      $filePath = $downloadDir . '/' . $filename;
+      
+      $io->text(sprintf('Downloading %s to %s...', $objectKey, $filePath));
       
       // Download the file from S3
       $s3Client->getObject([
         'Bucket' => $bucketName,
         'Key' => $objectKey,
-        'SaveAs' => $tempFile
+        'SaveAs' => $filePath
       ]);
       
       $io->text('Download complete. Processing file...');
@@ -244,24 +254,20 @@ class DbList extends Command
       // Handle different file types
       switch (strtolower($extension)) {
         case 'sql':
-          $this->importSqlFile($io, $tempFile);
+          $this->importSqlFile($io, $filePath);
           break;
         case 'gz':
         case 'gzip':
-          $this->importGzipFile($io, $tempFile);
+          $this->importGzipFile($io, $filePath);
           break;
         case 'zip':
-          $this->importZipFile($io, $tempFile);
+          $this->importZipFile($io, $filePath);
           break;
         default:
           $io->error(sprintf('Unsupported file type: %s', $extension));
       }
       
-      // Clean up the temporary file
-      if (file_exists($tempFile)) {
-        unlink($tempFile);
-        $io->text('Temporary file removed.');
-      }
+      $io->success(sprintf('File saved to: %s', $filePath));
       
     } catch (\Exception $e) {
       $io->error('Error during sync: ' . $e->getMessage());
