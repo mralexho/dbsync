@@ -226,9 +226,6 @@ class DbList extends Command
     $io->section('File Download');
     
     try {
-      // Get the file extension to determine file type
-      $extension = pathinfo($objectKey, PATHINFO_EXTENSION);
-      
       // Ensure the download directory exists
       if (!is_dir($downloadDir)) {
         if (!mkdir($downloadDir, 0755, true)) {
@@ -249,157 +246,13 @@ class DbList extends Command
         'SaveAs' => $filePath
       ]);
       
-      $io->text('Download complete. Processing file...');
-      
-      // Handle different file types
-      switch (strtolower($extension)) {
-        case 'sql':
-          $this->importSqlFile($io, $filePath);
-          break;
-        case 'gz':
-        case 'gzip':
-          $this->importGzipFile($io, $filePath);
-          break;
-        case 'zip':
-          $this->importZipFile($io, $filePath);
-          break;
-        default:
-          $io->error(sprintf('Unsupported file type: %s', $extension));
-      }
-      
-      $io->success(sprintf('File saved to: %s', $filePath));
+      $io->success(sprintf('File successfully downloaded to: %s', $filePath));
       
     } catch (\Exception $e) {
-      $io->error('Error during sync: ' . $e->getMessage());
+      $io->error('Error during download: ' . $e->getMessage());
     }
   }
   
-  /**
-   * Import a SQL file
-   */
-  private function importSqlFile(SymfonyStyle $io, string $filePath): void
-  {
-    $io->text('Processing SQL file...');
-
-    // Build the SQL command to import the file
-    $command = sprintf('ddev import-db < %s', escapeshellarg($filePath));
-
-    // Execute the SQL command
-    if ($this->executeCommand($io, $command)) {
-      $io->success('SQL file processed successfully.');
-    } else {
-      $io->error('Error processing SQL file.');
-    }
-  }
-  
-  /**
-   * Import a gzipped file
-   */
-  private function importGzipFile(SymfonyStyle $io, string $filePath): void
-  {
-    $io->text('Processing gzipped file...');
-    
-    // Create a temporary file for the uncompressed content
-    $tempSqlFile = tempnam(sys_get_temp_dir(), 'db_sync_sql_');
-    
-    try {
-      // Uncompress the gzip file
-      $gzipHandle = gzopen($filePath, 'rb');
-      $sqlHandle = fopen($tempSqlFile, 'wb');
-      
-      while (!gzeof($gzipHandle)) {
-        fwrite($sqlHandle, gzread($gzipHandle, 4096));
-      }
-      
-      gzclose($gzipHandle);
-      fclose($sqlHandle);
-      
-      // Process the uncompressed SQL file
-      $this->importSqlFile($io, $tempSqlFile);
-      
-      // Clean up
-      if (file_exists($tempSqlFile)) {
-        unlink($tempSqlFile);
-      }
-      
-    } catch (\Exception $e) {
-      $io->error('Error processing gzipped file: ' . $e->getMessage());
-      
-      // Clean up on error
-      if (file_exists($tempSqlFile)) {
-        unlink($tempSqlFile);
-      }
-    }
-  }
-  
-  /**
-   * Import a ZIP file
-   */
-  private function importZipFile(SymfonyStyle $io, string $filePath): void
-  {
-    $io->text('Processing ZIP file...');
-    
-    try {
-      $zip = new \ZipArchive();
-      if ($zip->open($filePath) === true) {
-        // Create a temporary directory for extraction
-        $tempDir = sys_get_temp_dir() . '/db_sync_zip_' . uniqid();
-        mkdir($tempDir);
-        
-        // Extract the ZIP file
-        $zip->extractTo($tempDir);
-        $zip->close();
-        
-        $io->text('ZIP file extracted. Looking for SQL files...');
-        
-        // Find SQL files in the extracted directory
-        $sqlFiles = glob($tempDir . '/*.sql');
-        
-        if (count($sqlFiles) > 0) {
-          foreach ($sqlFiles as $sqlFile) {
-            $io->text(sprintf('Found SQL file: %s', basename($sqlFile)));
-            $this->importSqlFile($io, $sqlFile);
-          }
-        } else {
-          $io->warning('No SQL files found in the ZIP archive.');
-        }
-        
-        // Clean up the temporary directory
-        $this->removeDirectory($tempDir);
-        
-      } else {
-        $io->error('Failed to open ZIP file.');
-      }
-    } catch (\Exception $e) {
-      $io->error('Error processing ZIP file: ' . $e->getMessage());
-      
-      // Clean up on error
-      if (isset($tempDir) && is_dir($tempDir)) {
-        $this->removeDirectory($tempDir);
-      }
-    }
-  }
-  
-  /**
-   * Recursively remove a directory and its contents
-   */
-  private function removeDirectory(string $dir): void
-  {
-    if (is_dir($dir)) {
-      $objects = scandir($dir);
-      foreach ($objects as $object) {
-        if ($object != "." && $object != "..") {
-          if (is_dir($dir . "/" . $object)) {
-            $this->removeDirectory($dir . "/" . $object);
-          } else {
-            unlink($dir . "/" . $object);
-          }
-        }
-      }
-      rmdir($dir);
-    }
-  }
-
   /**
    * Execute a shell command and return the output
    */
