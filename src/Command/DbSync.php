@@ -24,7 +24,8 @@ class DbSync extends Command
       ->addOption('s3profile', 'p', InputOption::VALUE_OPTIONAL, 'AWS profile', 'default')
       ->addOption('bucket', 'b', InputOption::VALUE_OPTIONAL, 'List objects in specific bucket')
       ->addOption('max-keys', 'm', InputOption::VALUE_OPTIONAL, 'Maximum number of objects to list', 25)
-      ->addOption('download-dir', 'd', InputOption::VALUE_OPTIONAL, 'Directory to save downloaded files', getcwd());
+      ->addOption('download-dir', 'd', InputOption::VALUE_OPTIONAL, 'Directory to save downloaded files', getcwd())
+      ->addOption('gunzip', 'g', InputOption::VALUE_NONE, 'Automatically gunzip downloaded files if they are gzipped');
   }
 
   protected function execute(InputInterface $input, OutputInterface $output): int
@@ -35,6 +36,7 @@ class DbSync extends Command
     $bucketName = $input->getOption('bucket');
     $maxKeys = (int)$input->getOption('max-keys');
     $downloadDir = $input->getOption('download-dir');
+    $gunzip = $input->getOption('gunzip');
 
     $io->title('Connecting to AWS S3');
     $io->text(sprintf('Using region: %s and profile: %s', $region, $profile));
@@ -49,7 +51,7 @@ class DbSync extends Command
 
       // If bucket name is provided, list objects in that bucket
       if ($bucketName) {
-        $this->listBucketObjects($s3Client, $io, $bucketName, $maxKeys, $downloadDir);
+        $this->listBucketObjects($s3Client, $io, $bucketName, $maxKeys, $downloadDir, $gunzip);
       } else {
         // List all buckets
         $this->listAllBuckets($s3Client, $io);
@@ -88,7 +90,7 @@ class DbSync extends Command
     }
   }
 
-  private function listBucketObjects(S3Client $s3Client, SymfonyStyle $io, string $bucketName, int $maxKeys, string $downloadDir): void
+  private function listBucketObjects(S3Client $s3Client, SymfonyStyle $io, string $bucketName, int $maxKeys, string $downloadDir, bool $gunzip = false): void
   {
     $io->section(sprintf('Listing objects in bucket: %s (max: %d objects)', $bucketName, $maxKeys));
 
@@ -123,7 +125,7 @@ class DbSync extends Command
       $listAll = $io->confirm('Would you like to list all objects in the bucket instead?', false);
       
       if ($listAll) {
-        $this->listAllObjects($s3Client, $io, $bucketName, $maxKeys, $downloadDir);
+        $this->listAllObjects($s3Client, $io, $bucketName, $maxKeys, $downloadDir, $input->getOption('gunzip'));
       }
       return;
     }
@@ -204,7 +206,7 @@ class DbSync extends Command
       if ($selectedIndex !== null) {
         $selectedFile = $fileChoices[$selectedIndex];
         $io->success(sprintf('Selected file: %s', $selectedFile));
-        $this->downloadFile($s3Client, $io, $bucketName, $selectedFile, $downloadDir);
+        $this->downloadFile($s3Client, $io, $bucketName, $selectedFile, $downloadDir, $gunzip);
       }
     } else {
       $io->warning(sprintf('No objects found in YYYY-MM-DD/db/ folders in bucket "%s".', $bucketName));
@@ -228,7 +230,7 @@ class DbSync extends Command
   /**
    * Sync a specific file from S3
    */
-  private function downloadFile(S3Client $s3Client, SymfonyStyle $io, string $bucketName, string $objectKey, string $downloadDir): void
+  private function downloadFile(S3Client $s3Client, SymfonyStyle $io, string $bucketName, string $objectKey, string $downloadDir, bool $gunzip = false): void
   {
     $io->section('File Download');
     
@@ -255,8 +257,86 @@ class DbSync extends Command
       
       $io->success(sprintf('File successfully downloaded to: %s', $filePath));
       
+      // Check if we should gunzip the file
+      if ($gunzip && $this->isGzipFile($filePath)) {
+        $this->gunzipFile($io, $filePath);
+      }
+      
     } catch (\Exception $e) {
       $io->error('Error during download: ' . $e->getMessage());
+    }
+  }
+  
+  /**
+   * Check if a file is gzipped by examining its magic bytes
+   */
+  private function isGzipFile(string $filePath): bool
+  {
+    if (!file_exists($filePath)) {
+      return false;
+    }
+    
+    $handle = fopen($filePath, 'rb');
+    if (!$handle) {
+      return false;
+    }
+    
+    $magicBytes = fread($handle, 2);
+    fclose($handle);
+    
+    // Check for gzip magic bytes (0x1f 0x8b)
+    return $magicBytes === "\x1f\x8b";
+  }
+  
+  /**
+   * Gunzip a file and remove the original gzipped file
+   */
+  private function gunzipFile(SymfonyStyle $io, string $gzipFilePath): void
+  {
+    $io->text('Detected gzipped file, extracting...');
+    
+    try {
+      // Determine output filename (remove .gz extension if present)
+      $outputPath = $gzipFilePath;
+      if (substr($gzipFilePath, -3) === '.gz') {
+        $outputPath = substr($gzipFilePath, 0, -3);
+      } else {
+        $outputPath = $gzipFilePath . '.extracted';
+      }
+      
+      // Open gzipped file for reading
+      $gzHandle = gzopen($gzipFilePath, 'rb');
+      if (!$gzHandle) {
+        throw new \RuntimeException('Could not open gzipped file for reading');
+      }
+      
+      // Open output file for writing
+      $outHandle = fopen($outputPath, 'wb');
+      if (!$outHandle) {
+        gzclose($gzHandle);
+        throw new \RuntimeException('Could not create output file');
+      }
+      
+      // Copy data from gzipped file to output file
+      while (!gzeof($gzHandle)) {
+        $chunk = gzread($gzHandle, 8192);
+        if ($chunk === false) {
+          break;
+        }
+        fwrite($outHandle, $chunk);
+      }
+      
+      // Close file handles
+      gzclose($gzHandle);
+      fclose($outHandle);
+      
+      // Remove the original gzipped file
+      unlink($gzipFilePath);
+      
+      $io->success(sprintf('File successfully extracted to: %s', $outputPath));
+      
+    } catch (\Exception $e) {
+      $io->error('Error during gunzip: ' . $e->getMessage());
     }
   }
   
@@ -315,7 +395,7 @@ class DbSync extends Command
   /**
    * List all objects in a bucket
    */
-  private function listAllObjects(S3Client $s3Client, SymfonyStyle $io, string $bucketName, int $maxKeys, string $downloadDir): void
+  private function listAllObjects(S3Client $s3Client, SymfonyStyle $io, string $bucketName, int $maxKeys, string $downloadDir, bool $gunzip = false): void
   {
     $io->section(sprintf('Listing all objects in bucket: %s (max: %d objects)', $bucketName, $maxKeys));
 
@@ -371,7 +451,7 @@ class DbSync extends Command
       if ($selectedIndex !== null) {
         $selectedFile = $fileChoices[$selectedIndex];
         $io->success(sprintf('Selected file: %s', $selectedFile));
-        $this->downloadFile($s3Client, $io, $bucketName, $selectedFile, $downloadDir);
+        $this->downloadFile($s3Client, $io, $bucketName, $selectedFile, $downloadDir, $gunzip);
       }
     } else {
       $io->warning(sprintf('No objects found in bucket "%s".', $bucketName));
