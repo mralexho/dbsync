@@ -246,15 +246,47 @@ class DbSync extends Command
       $filename = basename($objectKey);
       $filePath = $downloadDir . '/' . $filename;
       
-      $io->text(sprintf('Downloading %s to %s...', $objectKey, $filePath));
+      // Get object metadata to determine file size
+      $headResult = $s3Client->headObject([
+        'Bucket' => $bucketName,
+        'Key' => $objectKey
+      ]);
       
-      // Download the file from S3
+      $fileSize = $headResult['ContentLength'];
+      $io->text(sprintf('Downloading %s (%s) to %s...', $objectKey, $this->formatSize($fileSize), $filePath));
+      
+      // Create progress bar
+      $progressBar = $io->createProgressBar($fileSize);
+      $progressBar->setFormat(' %current%/%max% [%bar%] %percent:3s%% %elapsed:6s%/%estimated:-6s% %memory:6s%');
+      $progressBar->setFormatDefinition('custom', ' %current_mb%/%max_mb% MB [%bar%] %percent:3s%% %elapsed:6s%/%estimated:-6s% %memory:6s%');
+      $progressBar->setFormat('custom');
+      
+      // Add custom placeholders for MB display
+      $progressBar->setMessage(number_format($fileSize / 1024 / 1024, 2), 'max_mb');
+      $progressBar->setMessage('0.00', 'current_mb');
+      
+      $progressBar->start();
+      
+      $downloadedBytes = 0;
+      
+      // Download the file from S3 with progress tracking
       $s3Client->getObject([
         'Bucket' => $bucketName,
         'Key' => $objectKey,
-        'SaveAs' => $filePath
+        'SaveAs' => $filePath,
+        '@http' => [
+          'progress' => function ($downloadTotal, $downloadedSoFar, $uploadTotal, $uploadedSoFar) use ($progressBar, &$downloadedBytes) {
+            if ($downloadedSoFar > $downloadedBytes) {
+              $progressBar->advance($downloadedSoFar - $downloadedBytes);
+              $progressBar->setMessage(number_format($downloadedSoFar / 1024 / 1024, 2), 'current_mb');
+              $downloadedBytes = $downloadedSoFar;
+            }
+          }
+        ]
       ]);
       
+      $progressBar->finish();
+      $io->newLine(2);
       $io->success(sprintf('File successfully downloaded to: %s', $filePath));
       
       // Check if we should gunzip the file
