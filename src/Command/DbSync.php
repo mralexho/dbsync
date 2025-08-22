@@ -118,6 +118,13 @@ class DbSync extends Command
     
     if (empty($dateFolders)) {
       $io->warning(sprintf('No date-based folders (YYYY-MM-DD/) found in bucket "%s".', $bucketName));
+      
+      // Ask user if they want to list all objects instead
+      $listAll = $io->confirm('Would you like to list all objects in the bucket instead?', false);
+      
+      if ($listAll) {
+        $this->listAllObjects($s3Client, $io, $bucketName, $maxKeys, $downloadDir);
+      }
       return;
     }
     
@@ -303,5 +310,71 @@ class DbSync extends Command
     
     $io->error('Failed to execute command');
     return false;
+  }
+  
+  /**
+   * List all objects in a bucket
+   */
+  private function listAllObjects(S3Client $s3Client, SymfonyStyle $io, string $bucketName, int $maxKeys, string $downloadDir): void
+  {
+    $io->section(sprintf('Listing all objects in bucket: %s (max: %d objects)', $bucketName, $maxKeys));
+
+    $result = $s3Client->listObjectsV2([
+      'Bucket' => $bucketName,
+      'MaxKeys' => $maxKeys
+    ]);
+
+    $objects = $result['Contents'] ?? [];
+
+    if (count($objects) > 0) {
+      $tableRows = [];
+      $fileChoices = [];
+      $index = 1;
+      
+      foreach ($objects as $object) {
+        $size = $this->formatSize($object['Size']);
+        $tableRows[] = [
+          $index,
+          $object['Key'],
+          $size,
+          $object['LastModified']->format('Y-m-d H:i:s')
+        ];
+        
+        $fileChoices[$index] = $object['Key'];
+        $index++;
+      }
+
+      $io->table(['#', 'Key', 'Size', 'Last Modified'], $tableRows);
+      
+      $io->info(sprintf('Found %d objects in bucket.', count($objects)));
+      
+      if ($result['IsTruncated'] ?? false) {
+        $io->note(sprintf('Showing only %d objects. Use --max-keys option to show more.', $maxKeys));
+      }
+      
+      // Ask user to select a file to download directly
+      $selectedIndex = $io->ask(
+        'Enter the number (#) of the file you want to download (or press Enter to skip)',
+        null,
+        function ($answer) use ($fileChoices) {
+          if ($answer === null || $answer === '') {
+            return null;
+          }
+          $answer = (int)$answer;
+          if (!isset($fileChoices[$answer])) {
+            throw new \RuntimeException('Invalid selection. Please enter a valid number from the list.');
+          }
+          return $answer;
+        }
+      );
+      
+      if ($selectedIndex !== null) {
+        $selectedFile = $fileChoices[$selectedIndex];
+        $io->success(sprintf('Selected file: %s', $selectedFile));
+        $this->downloadFile($s3Client, $io, $bucketName, $selectedFile, $downloadDir);
+      }
+    } else {
+      $io->warning(sprintf('No objects found in bucket "%s".', $bucketName));
+    }
   }
 }
